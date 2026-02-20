@@ -1,0 +1,5 @@
+requests>=2.31.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+vadersentiment>=3.3.2
+python-dateutil>=2.8.2
