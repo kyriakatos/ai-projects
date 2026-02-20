@@ -89,8 +89,8 @@ def main() -> None:
     df.sort_values(["Name", "Date"], inplace=True)
 
     # Output filenames
-    csv_file = "outputs/nasdaq_stock_prices_last_5_years.csv"
-    parquet_file = "outputs/nasdaq_stock_prices_last_5_years.parquet"
+    csv_file = "nasdaq_stock_prices_last_5_years.csv"
+    parquet_file = "nasdaq_stock_prices_last_5_years.parquet"
 
     # Export CSV
     logging.info("Writing CSV: %s", csv_file)
