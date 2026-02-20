@@ -1,0 +1,22 @@
+[project]
+name = "stock-agent"
+version = "0.1.0"
+description = "AI agent that fetches stock prices and exports CSV + Parquet."
+requires-python = ">=3.10"
+dependencies = [
+  "openai-agents>=0.1.0",
+  "yfinance>=0.2.40",
+  "pandas>=2.0.0",
+  "pyarrow>=14.0.0",
+  "fastapi>=0.110.0",
+  "uvicorn[standard]>=0.27.0",
+]
+
+[project.scripts]
+stock-agent = "stock_agent.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
