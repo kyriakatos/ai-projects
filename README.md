@@ -11,7 +11,7 @@ A curated portfolio of my AI/ML prototypes, experiments, and production-ready im
 
 | Project | What it is | Stack / Tools | Status |
 |---|---|---|---|
-| *(example)* | *(short description)* | *(e.g., Python, LangChain)* | *(WIP / Done)* |
+| Law Assistant| Phase 1 - Generate summary of Legal Case Files| LLama Mistral 8B, Python| * WIP *|
 
 ## How I work
 - Clear goals and scope
