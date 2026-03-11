@@ -1,0 +1,20 @@
+Post 1 — Building a Local Greek RAG System
+
+I just experimented with building a fully local Retrieval‑Augmented Generation (RAG) pipeline for Greek documents using Meltemi‑7B.
+
+Key idea:
+Documents → Chunking → Embeddings → Vector Search → Context Injection → LLM Response
+
+What makes this powerful:
+• Works completely offline
+• Reduces hallucinations
+• Answers are grounded in your documents
+
+Stack used:
+LM Studio + Meltemi‑7B
+FAISS vector store
+Multilingual embeddings (intfloat/multilingual-e5-base)
+
+Inspired by techniques from the Coursera course “ChatGPT Code Interpreter” by Jules White.
+
+Local AI + your documents = a powerful private knowledge assistant.

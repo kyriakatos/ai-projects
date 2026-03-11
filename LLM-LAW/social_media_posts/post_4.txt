@@ -1,0 +1,19 @@
+Post 4 — Tips for Building Reliable RAG Systems
+
+A few lessons from setting up a Greek RAG pipeline:
+
+Best practices:
+• Chunk size around 512 tokens
+• Chunk overlap ~100 tokens
+• Temperature between 0.2–0.4
+• Force the model to answer ONLY from retrieved context
+
+Common mistakes:
+• Large chunk sizes
+• English‑only embeddings
+• High temperature
+• Allowing ungrounded answers
+
+When done right, RAG transforms static documents into a searchable AI knowledge system.
+
+Inspired by prompt engineering strategies taught in the Coursera course “ChatGPT Code Interpreter” by Jules White.

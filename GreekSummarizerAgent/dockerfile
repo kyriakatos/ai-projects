@@ -1,0 +1,28 @@
+FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime
+
+WORKDIR /app
+
+# System dependencies
+RUN apt-get update && apt-get install -y \
+    git curl build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY app/ ./app/
+
+# Pre-download model at build time (optional — remove if you want runtime download)
+ARG HF_TOKEN=""
+RUN if [ -n "$HF_TOKEN" ]; then \
+    python -c "from transformers import AutoTokenizer, AutoModelForCausalLM; \
+    AutoTokenizer.from_pretrained('ilsp/Llama-Krikri-8B-Base', token='$HF_TOKEN'); \
+    AutoModelForCausalLM.from_pretrained('ilsp/Llama-Krikri-8B-Base', token='$HF_TOKEN')"; \
+fi
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,23 @@
+Post 3 — Turning Documents Into a Knowledge Assistant
+
+With a simple RAG pipeline you can transform internal documents into an intelligent assistant.
+
+Example use cases:
+• Laws and regulations
+• HR manuals
+• Academic papers
+• Compliance documentation
+• Internal policies
+
+Workflow:
+
+1. Load documents (PDF, DOCX, TXT)
+2. Chunk them into small sections
+3. Create embeddings
+4. Store vectors in FAISS
+5. Retrieve relevant sections
+6. Inject them into the LLM prompt
+
+Meltemi‑7B then generates answers grounded in the retrieved content.
+
+The result: high accuracy and dramatically reduced hallucinations.

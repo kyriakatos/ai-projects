@@ -1,0 +1,18 @@
+Post 2 — Why Multilingual Embeddings Matter
+
+When building a RAG system for Greek documents, one of the biggest mistakes is using English‑only embeddings.
+
+A much better approach:
+Use multilingual models like:
+
+intfloat/multilingual-e5-base
+
+Why it matters:
+• Handles Greek legal text well
+• Works with mixed Greek–English documents
+• Produces much better semantic search results
+
+In the system I built:
+Greek PDFs → embeddings → FAISS vector search → Meltemi‑7B answers grounded in context.
+
+Inspired by workflows from the Coursera course “ChatGPT Code Interpreter” by Jules White.

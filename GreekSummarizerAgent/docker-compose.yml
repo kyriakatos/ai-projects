@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  summarizer:
+    build:
+      context: .
+      args:
+        HF_TOKEN: ${HF_TOKEN:-}
+    image: greek-summarizer-agent
+    ports:
+      - "8000:8000"
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - DEVICE=cuda
+      - MAX_NEW_TOKENS=512
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+
+volumes:
+  hf_cache:
