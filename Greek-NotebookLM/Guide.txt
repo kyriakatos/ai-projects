@@ -1,0 +1,934 @@
+FastAPI service
+	•	PyMuPDF + OCR pipeline
+	•	OpenSearch for hybrid retrieval
+	•	Sentence Transformers embeddings
+	•	optional Postgres for metadata/users
+	•	frontend in Streamlit, React, or Gradio
+	
+	PLAN
+	
+	
+	greek_search_agent/
+├─ app/
+│  ├─ main.py
+│  ├─ ingest.py
+│  ├─ normalize.py
+│  ├─ chunking.py
+│  ├─ search.py
+│  ├─ answer.py
+│  └─ models.py
+├─ docs/
+├─ data/
+│  ├─ metadata.json
+│  └─ faiss.index
+├─ tests/
+├─ requirements.txt
+└─ README.md
+
+
+
+Minimum API design
+
+Endpoints:
+	•	POST /ingest
+	•	POST /search
+	•	POST /ask
+
+Example /search response:
+	
+	{
+  "query": "προθεσμία παράδοσης",
+  "results": [
+    {
+      "source": "contract_01.pdf",
+      "page": 12,
+      "score": 0.91,
+      "text": "..."
+    }
+  ]
+}
+
+
+My recommendation
+
+Start with this order:
+	1.	local ingestion + chunking
+	2.	hybrid retrieval
+	3.	citations
+	4.	/search API
+	5.	/ask LLM layer
+	6.	OCR
+	7.	production index
+
+That gets you something useful quickly without overengineering.
+
+Demo code
+
+pip install pymupdf sentence-transformers faiss-cpu numpy
+
+
+from __future__ import annotations
+
+import os
+import re
+import math
+import json
+import unicodedata
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import List, Dict, Tuple
+
+import fitz  # PyMuPDF
+import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+
+# -----------------------------
+# Data models
+# -----------------------------
+@dataclass
+class Chunk:
+    chunk_id: int
+    doc_id: str
+    source_path: str
+    page: int | None
+    text: str
+    normalized_text: str
+
+
+# -----------------------------
+# Greek normalization
+# -----------------------------
+def strip_diacritics(text: str) -> str:
+    decomposed = unicodedata.normalize("NFD", text)
+    stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return unicodedata.normalize("NFC", stripped)
+
+
+def normalize_greek(text: str) -> str:
+    text = text.lower()
+    text = strip_diacritics(text)
+
+    # Normalize final sigma to standard sigma for easier matching
+    text = text.replace("ς", "σ")
+
+    # Keep Greek/Latin letters and digits, replace other chars with space
+    text = re.sub(r"[^0-9a-zA-ZΑ-Ωα-ω\s]", " ", text)
+
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def tokenize(text: str) -> List[str]:
+    return normalize_greek(text).split()
+
+
+# -----------------------------
+# Text extraction
+# -----------------------------
+def extract_pdf_text(pdf_path: str) -> List[Tuple[int, str]]:
+    """
+    Returns: list of (page_number_1_based, page_text)
+    """
+    pages = []
+    doc = fitz.open(pdf_path)
+    try:
+        for i, page in enumerate(doc):
+            # sort=True often improves reading order for many PDFs
+            text = page.get_text("text", sort=True)
+            pages.append((i + 1, text))
+    finally:
+        doc.close()
+    return pages
+
+
+def extract_txt_text(txt_path: str) -> List[Tuple[int | None, str]]:
+    text = Path(txt_path).read_text(encoding="utf-8", errors="ignore")
+    return [(None, text)]
+
+
+# -----------------------------
+# Chunking
+# -----------------------------
+def chunk_text(
+    text: str,
+    chunk_size_words: int = 180,
+    overlap_words: int = 40,
+) -> List[str]:
+    words = text.split()
+    if not words:
+        return []
+
+    chunks = []
+    step = max(1, chunk_size_words - overlap_words)
+    for start in range(0, len(words), step):
+        end = start + chunk_size_words
+        piece = " ".join(words[start:end]).strip()
+        if piece:
+            chunks.append(piece)
+        if end >= len(words):
+            break
+    return chunks
+
+
+# -----------------------------
+# Simple lexical scoring
+# -----------------------------
+def lexical_score(query: str, doc_text: str) -> float:
+    """
+    Very lightweight keyword scorer.
+    For production, replace with BM25 / OpenSearch.
+    """
+    q_tokens = tokenize(query)
+    d_tokens = tokenize(doc_text)
+
+    if not q_tokens or not d_tokens:
+        return 0.0
+
+    tf = {}
+    for t in d_tokens:
+        tf[t] = tf.get(t, 0) + 1
+
+    score = 0.0
+    for qt in q_tokens:
+        # Exact token hits get most weight
+        score += tf.get(qt, 0)
+
+        # Substring fallback for OCR-ish or inflected noise
+        if qt not in tf and qt in normalize_greek(doc_text):
+            score += 0.5
+
+    # Length normalization
+    score /= math.sqrt(len(d_tokens) + 1)
+    return score
+
+
+# -----------------------------
+# Search engine
+# -----------------------------
+class GreekHybridSearchAgent:
+    def __init__(self, embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"):
+        self.model = SentenceTransformer(embedding_model)
+        self.chunks: List[Chunk] = []
+        self.embeddings: np.ndarray | None = None
+        self.index: faiss.IndexFlatIP | None = None
+
+    def add_document(self, path: str) -> None:
+        path_obj = Path(path)
+        suffix = path_obj.suffix.lower()
+
+        if suffix == ".pdf":
+            pages = extract_pdf_text(path)
+        elif suffix in {".txt", ".md"}:
+            pages = extract_txt_text(path)
+        else:
+            raise ValueError(f"Unsupported file type: {suffix}")
+
+        doc_id = path_obj.stem
+
+        for page_num, page_text in pages:
+            page_chunks = chunk_text(page_text)
+            for piece in page_chunks:
+                chunk = Chunk(
+                    chunk_id=len(self.chunks),
+                    doc_id=doc_id,
+                    source_path=str(path_obj),
+                    page=page_num,
+                    text=piece,
+                    normalized_text=normalize_greek(piece),
+                )
+                self.chunks.append(chunk)
+
+    def build_index(self) -> None:
+        if not self.chunks:
+            raise ValueError("No chunks to index.")
+
+        texts = [c.text for c in self.chunks]
+        emb = self.model.encode(
+            texts,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=True,
+        ).astype("float32")
+
+        dim = emb.shape[1]
+        index = faiss.IndexFlatIP(dim)  # cosine if vectors are normalized
+        index.add(emb)
+
+        self.embeddings = emb
+        self.index = index
+
+    def search(self, query: str, top_k: int = 5, alpha: float = 0.65) -> List[Dict]:
+        """
+        alpha: weight for semantic score
+        lexical weight = (1 - alpha)
+        """
+        if self.index is None or self.embeddings is None:
+            raise ValueError("Index not built. Call build_index() first.")
+
+        # Semantic search
+        q_emb = self.model.encode(
+            [query],
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        ).astype("float32")
+
+        sem_scores, sem_ids = self.index.search(q_emb, min(top_k * 5, len(self.chunks)))
+        sem_scores = sem_scores[0]
+        sem_ids = sem_ids[0]
+
+        # Candidate set from semantic search
+        candidate_ids = [int(i) for i in sem_ids if i != -1]
+
+        # Add lexical-only candidates by scanning all chunks
+        lex_scores = []
+        for ch in self.chunks:
+            s = lexical_score(query, ch.text)
+            if s > 0:
+                lex_scores.append((ch.chunk_id, s))
+
+        lex_scores.sort(key=lambda x: x[1], reverse=True)
+        candidate_ids.extend([cid for cid, _ in lex_scores[: top_k * 5]])
+        candidate_ids = list(dict.fromkeys(candidate_ids))  # deduplicate, preserve order
+
+        # Normalize semantic scores among candidates
+        sem_map = {int(cid): float(score) for cid, score in zip(sem_ids, sem_scores) if cid != -1}
+        sem_vals = [sem_map.get(cid, 0.0) for cid in candidate_ids]
+        sem_min, sem_max = min(sem_vals, default=0.0), max(sem_vals, default=1.0)
+
+        def norm_sem(v: float) -> float:
+            if sem_max == sem_min:
+                return 0.0
+            return (v - sem_min) / (sem_max - sem_min)
+
+        # Normalize lexical scores among candidates
+        lex_map = {cid: score for cid, score in lex_scores}
+        lex_vals = [lex_map.get(cid, 0.0) for cid in candidate_ids]
+        lex_min, lex_max = min(lex_vals, default=0.0), max(lex_vals, default=1.0)
+
+        def norm_lex(v: float) -> float:
+            if lex_max == lex_min:
+                return 0.0
+            return (v - lex_min) / (lex_max - lex_min)
+
+        ranked = []
+        for cid in candidate_ids:
+            ch = self.chunks[cid]
+            s_sem = norm_sem(sem_map.get(cid, 0.0))
+            s_lex = norm_lex(lex_map.get(cid, 0.0))
+            final_score = alpha * s_sem + (1.0 - alpha) * s_lex
+
+            ranked.append({
+                "chunk_id": ch.chunk_id,
+                "doc_id": ch.doc_id,
+                "source_path": ch.source_path,
+                "page": ch.page,
+                "score": round(final_score, 4),
+                "semantic_score": round(s_sem, 4),
+                "lexical_score": round(s_lex, 4),
+                "text": ch.text,
+            })
+
+        ranked.sort(key=lambda x: x["score"], reverse=True)
+        return ranked[:top_k]
+
+    def save_metadata(self, out_path: str) -> None:
+        data = [asdict(c) for c in self.chunks]
+        Path(out_path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# -----------------------------
+# Example usage
+# -----------------------------
+if __name__ == "__main__":
+    agent = GreekHybridSearchAgent()
+
+    docs_dir = Path("./docs")
+    for p in docs_dir.glob("*"):
+        if p.suffix.lower() in {".pdf", ".txt", ".md"}:
+            print(f"Adding {p}")
+            agent.add_document(str(p))
+
+    agent.build_index()
+
+    query = "σύμβαση προμήθειας και προθεσμία παράδοσης"
+    results = agent.search(query, top_k=5)
+
+    print("\nTop results:\n")
+    for r in results:
+        page_part = f", page {r['page']}" if r["page"] is not None else ""
+        print(f"[score={r['score']}] {r['source_path']}{page_part}")
+        print(r["text"][:500])
+        print("-" * 80)
+        
+        
+        -----------------
+        
+        
+        
+        Stack I would choose
+	•	FastAPI for the API
+	•	python-docx for DOCX extraction
+	•	PyMuPDF for PDF extraction
+	•	PostgreSQL + pgvector
+	•	sentence-transformers embeddings for retrieval
+	•	vLLM or Transformers for serving Llama-Krikri-8B-Instruct
+
+Krikri’s model card also shows example usage with both Transformers and an OpenAI-compatible vLLM server, so serving it behind an API is straightforward.  ￼
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE documents (
+    id UUID PRIMARY KEY,
+    filename TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE chunks (
+    id UUID PRIMARY KEY,
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_index INT NOT NULL,
+    page_number INT,
+    section_title TEXT,
+    text_original TEXT NOT NULL,
+    text_normalized TEXT NOT NULL,
+    embedding vector(1024) -- adjust to your embedding model dimension
+);
+
+CREATE INDEX idx_chunks_document_id ON chunks(document_id);
+CREATE INDEX idx_chunks_embedding ON chunks USING ivfflat (embedding vector_cosine_ops);
+
+-- Optional PostgreSQL full text index
+ALTER TABLE chunks
+ADD COLUMN tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', text_normalized)) STORED;
+
+CREATE INDEX idx_chunks_tsv ON chunks USING GIN (tsv);
+
+Practical design choice for Greek
+
+Keep two forms of the chunk text:
+	•	text_original: what you show to users
+	•	text_normalized: lowercased, normalized, optionally de-accented Greek used for search
+
+That helps match queries like:
+	•	Αθήνα
+	•	αθηνα
+	•	OCR-imperfect text
+
+Minimal project layout
+
+app/
+  main.py
+  db.py
+  models.py
+  schemas.py
+  ingest.py
+  extractors.py
+  greek_text.py
+  embeddings.py
+  search.py
+  llm.py
+storage/
+
+Sample implementation
+
+1) Requirements
+
+pip install fastapi uvicorn sqlalchemy psycopg2-binary pgvector python-docx pymupdf sentence-transformers python-multipart
+
+
+2) Greek normalization
+
+# greek_text.py
+import re
+import unicodedata
+
+def strip_diacritics(text: str) -> str:
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return unicodedata.normalize("NFC", text)
+
+def normalize_greek(text: str) -> str:
+    text = text.lower()
+    text = strip_diacritics(text)
+    text = text.replace("ς", "σ")
+    text = re.sub(r"[^\w\sΑ-Ωα-ω]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+    
+   3) PDF and DOCX extraction
+   
+   
+   # extractors.py
+from pathlib import Path
+from typing import List, Tuple, Optional
+import fitz
+from docx import Document as DocxDocument
+
+def extract_pdf(path: str) -> List[Tuple[Optional[int], str]]:
+    result = []
+    pdf = fitz.open(path)
+    try:
+        for i, page in enumerate(pdf):
+            text = page.get_text("text", sort=True)
+            result.append((i + 1, text))
+    finally:
+        pdf.close()
+    return result
+
+def extract_docx(path: str) -> List[Tuple[Optional[int], str]]:
+    doc = DocxDocument(path)
+    paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    text = "\n".join(paragraphs)
+    return [(None, text)]
+
+def extract_text(path: str) -> List[Tuple[Optional[int], str]]:
+    ext = Path(path).suffix.lower()
+    if ext == ".pdf":
+        return extract_pdf(path)
+    if ext == ".docx":
+        return extract_docx(path)
+    raise ValueError(f"Unsupported file type: {ext}")
+    
+    
+    4) Chunking
+    
+    # ingest.py
+from typing import List, Dict, Optional
+
+def chunk_text(text: str, chunk_size: int = 180, overlap: int = 40) -> List[str]:
+    words = text.split()
+    if not words:
+        return []
+
+    chunks = []
+    step = max(1, chunk_size - overlap)
+    for start in range(0, len(words), step):
+        part = " ".join(words[start:start + chunk_size]).strip()
+        if part:
+            chunks.append(part)
+        if start + chunk_size >= len(words):
+            break
+    return chunks
+
+def make_chunk_records(extracted_pages, normalize_fn):
+    records = []
+    chunk_idx = 0
+    for page_number, page_text in extracted_pages:
+        for piece in chunk_text(page_text):
+            records.append({
+                "chunk_index": chunk_idx,
+                "page_number": page_number,
+                "text_original": piece,
+                "text_normalized": normalize_fn(piece),
+            })
+            chunk_idx += 1
+    return records
+    
+    
+    5) Embeddings
+
+For retrieval, I would still use a multilingual embedding model rather than the Llama model itself. The Llama model should answer; the embedding model should retrieve.
+
+# embeddings.py
+from sentence_transformers import SentenceTransformer
+
+_model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    return _model.encode(texts, normalize_embeddings=True).tolist()
+
+def embed_query(text: str) -> list[float]:
+    return _model.encode([text], normalize_embeddings=True)[0].tolist()
+    
+    
+    6) SQLAlchemy models
+    
+    # models.py
+import uuid
+from sqlalchemy import Column, Text, Integer, ForeignKey, DateTime
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.sql import func
+from pgvector.sqlalchemy import Vector
+
+Base = declarative_base()
+
+class Document(Base):
+    __tablename__ = "documents"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    filename = Column(Text, nullable=False)
+    mime_type = Column(Text, nullable=False)
+    storage_path = Column(Text, nullable=False)
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    chunks = relationship("Chunk", back_populates="document", cascade="all, delete-orphan")
+
+class Chunk(Base):
+    __tablename__ = "chunks"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    page_number = Column(Integer, nullable=True)
+    section_title = Column(Text, nullable=True)
+    text_original = Column(Text, nullable=False)
+    text_normalized = Column(Text, nullable=False)
+    embedding = Column(Vector(384))  # MiniLM-L12-v2 outputs 384 dims
+
+    document = relationship("Document", back_populates="chunks")
+    
+    
+    7) Upload Endpoint
+    
+    # main.py
+import os
+import mimetypes
+from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, Session
+
+from models import Base, Document, Chunk
+from extractors import extract_text
+from ingest import make_chunk_records
+from greek_text import normalize_greek
+from embeddings import embed_texts, embed_query
+
+DATABASE_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/greekdocs"
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine)
+Base.metadata.create_all(engine)
+
+app = FastAPI(title="Greek Document Search")
+
+STORAGE_DIR = Path("storage")
+STORAGE_DIR.mkdir(exist_ok=True)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+@app.post("/upload")
+async def upload_document(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    ext = Path(file.filename).suffix.lower()
+    if ext not in {".pdf", ".docx"}:
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX are supported.")
+
+    storage_path = STORAGE_DIR / file.filename
+    content = await file.read()
+    storage_path.write_bytes(content)
+
+    mime_type = file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+
+    doc = Document(
+        filename=file.filename,
+        mime_type=mime_type,
+        storage_path=str(storage_path),
+    )
+    db.add(doc)
+    db.flush()
+
+    extracted = extract_text(str(storage_path))
+    chunk_records = make_chunk_records(extracted, normalize_greek)
+    vectors = embed_texts([c["text_original"] for c in chunk_records]) if chunk_records else []
+
+    for rec, vec in zip(chunk_records, vectors):
+        db.add(Chunk(
+            document_id=doc.id,
+            chunk_index=rec["chunk_index"],
+            page_number=rec["page_number"],
+            section_title=None,
+            text_original=rec["text_original"],
+            text_normalized=rec["text_normalized"],
+            embedding=vec,
+        ))
+
+    db.commit()
+    return {"document_id": str(doc.id), "filename": doc.filename, "chunks": len(chunk_records)}
+    
+    8) Hybrid search endpoint
+
+This combines:
+	•	PostgreSQL text search for exact references
+	•	pgvector cosine similarity for semantic matches
+	
+	
+	from sqlalchemy import text as sql_text
+
+@app.get("/search")
+def search_documents(q: str, top_k: int = 10, db: Session = Depends(get_db)):
+    q_norm = normalize_greek(q)
+    q_vec = embed_query(q)
+
+    sql = sql_text("""
+    WITH lexical AS (
+        SELECT
+            c.id,
+            c.document_id,
+            c.page_number,
+            c.text_original,
+            d.filename,
+            ts_rank_cd(c.tsv, plainto_tsquery('simple', :q_norm)) AS lexical_score
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE c.tsv @@ plainto_tsquery('simple', :q_norm)
+        ORDER BY lexical_score DESC
+        LIMIT 50
+    ),
+    semantic AS (
+        SELECT
+            c.id,
+            c.document_id,
+            c.page_number,
+            c.text_original,
+            d.filename,
+            1 - (c.embedding <=> :q_vec) AS semantic_score
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        ORDER BY c.embedding <=> :q_vec
+        LIMIT 50
+    ),
+    combined AS (
+        SELECT
+            COALESCE(l.id, s.id) AS id,
+            COALESCE(l.document_id, s.document_id) AS document_id,
+            COALESCE(l.page_number, s.page_number) AS page_number,
+            COALESCE(l.text_original, s.text_original) AS text_original,
+            COALESCE(l.filename, s.filename) AS filename,
+            COALESCE(l.lexical_score, 0) AS lexical_score,
+            COALESCE(s.semantic_score, 0) AS semantic_score,
+            COALESCE(l.lexical_score, 0) * 0.45 + COALESCE(s.semantic_score, 0) * 0.55 AS final_score
+        FROM lexical l
+        FULL OUTER JOIN semantic s ON l.id = s.id
+    )
+    SELECT *
+    FROM combined
+    ORDER BY final_score DESC
+    LIMIT :top_k
+    """)
+
+    rows = db.execute(sql, {
+        "q_norm": q_norm,
+        "q_vec": q_vec,
+        "top_k": top_k
+    }).mappings().all()
+
+    return {
+        "query": q,
+        "results": [
+            {
+                "filename": r["filename"],
+                "page_number": r["page_number"],
+                "score": float(r["final_score"]),
+                "lexical_score": float(r["lexical_score"]),
+                "semantic_score": float(r["semantic_score"]),
+                "text": r["text_original"]
+            }
+            for r in rows
+        ]
+    }
+    
+    
+    LLM answering layer with Greek Llama
+
+For the answering endpoint, run Llama-Krikri-8B-Instruct behind vLLM, then pass only the top retrieved chunks into the prompt. Krikri’s card includes an OpenAI-compatible vLLM serving example, which makes this pattern easy to implement. 
+
+
+# llm.py
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="token-abc123",
+    base_url="http://localhost:8000/v1"
+)
+
+SYSTEM_PROMPT = """
+Απαντάς μόνο με βάση τα αποσπάσματα που σου δόθηκαν.
+Αν δεν υπάρχουν αρκετά στοιχεία, πες ότι δεν επαρκούν τα τεκμήρια.
+Να αναφέρεις πάντα πηγές ως [πηγή: filename, σελ. X].
+"""
+
+def answer_with_sources(question: str, passages: list[dict]) -> str:
+    context_parts = []
+    for i, p in enumerate(passages, start=1):
+        page = p["page_number"] if p["page_number"] is not None else "-"
+        context_parts.append(
+            f"[Απόσπασμα {i}] [πηγή: {p['filename']}, σελ. {page}]\n{p['text']}"
+        )
+    context = "\n\n".join(context_parts)
+
+    user_prompt = f"""Ερώτηση:
+{question}
+
+Αποσπάσματα:
+{context}
+"""
+
+    resp = client.chat.completions.create(
+        model="ilsp/Llama-Krikri-8B-Instruct",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+        max_tokens=1200,
+    )
+    return resp.choices[0].message.content
+    
+    
+    What I would do in practice
+
+I would not use the Greek Llama model for retrieval itself. I would use it only for:
+	•	summarizing findings
+	•	answering questions over retrieved chunks
+	•	extracting structured fields
+	•	comparing passages across documents
+
+For retrieval, I would use embeddings + keyword search. That is faster, cheaper, and more reliable for exact references.
+
+
+Best concrete recommendation
+
+Given your requirements, my recommendation is:
+	•	Repository/database: PostgreSQL + pgvector
+	•	File storage: local disk or S3-compatible object storage
+	•	Formats: PDF and DOCX
+	•	Retrieval: hybrid keyword + vector search
+	•	Greek LLM: Llama-Krikri-8B-Instruct
+	•	Serving: FastAPI + vLLM
+
+Reason:
+	•	it supports Greek explicitly and is built for Greek adaptation on top of Llama 3.1-8B  ￼
+	•	it supports long context and RAG-style use cases per the model card  ￼
+	•	it is more aligned with your “dedicated to Greek” requirement than the official Llama 4 releases I found  ￼
+
+The only caveat is this: if your top priority is strictly “latest official Meta Llama,” choose Llama 4; if your top priority is “best available Llama-family model specialized for Greek,” choose Krikri.  ￼
+
+I can turn this into a complete working FastAPI starter project next, with /upload, /search, /ask, SQL migrations, and Docker files.
+
+
+A good NotebookLM-style prompt
+
+For your Greek Llama model:
+	
+SYSTEM_PROMPT = """
+Είσαι βοηθός ανάλυσης εγγράφων.
+Απαντάς μόνο με βάση τα αποσπάσματα που σου δόθηκαν.
+Δεν χρησιμοποιείς εξωτερική γνώση.
+Αν η απάντηση δεν τεκμηριώνεται επαρκώς, το λες ρητά.
+
+Κανόνες:
+1. Να γράφεις στα Ελληνικά.
+2. Κάθε ουσιαστικός ισχυρισμός να συνοδεύεται από παραπομπή.
+3. Οι παραπομπές να είναι της μορφής [πηγή: filename, σελ. X].
+4. Αν υπάρχουν αντικρουόμενα σημεία στα έγγραφα, να τα επισημαίνεις.
+5. Αν η ερώτηση ζητά σύγκριση, να συγκρίνεις μόνο όσα αναφέρονται στα αποσπάσματα.
+"""
+
+Example FastAPI endpoints
+
+POST   /notebooks
+GET    /notebooks
+POST   /notebooks/{id}/upload
+GET    /notebooks/{id}/documents
+GET    /notebooks/{id}/search?q=...
+POST   /notebooks/{id}/ask
+POST   /notebooks/{id}/summarize
+POST   /notebooks/{id}/compare
+GET    /notebooks/{id}/notes
+POST   /notebooks/{id}/notes
+
+Example /ask request
+
+{
+  "question": "Πού αναφέρεται η προθεσμία παράδοσης και ποια είναι;",
+  "top_k": 10
+}
+
+Example /ask response
+
+{
+  "answer": "Η προθεσμία παράδοσης αναφέρεται στο contract_01.pdf και ορίζεται σε 30 ημέρες από την υπογραφή [πηγή: contract_01.pdf, σελ. 12]. Επίσης στα παραρτήματα γίνεται αναφορά σε δυνατότητα παράτασης 10 ημερών [πηγή: appendix.docx, σελ. -].",
+  "sources": [
+    {
+      "filename": "contract_01.pdf",
+      "page_number": 12,
+      "snippet": "Η παράδοση θα ολοκληρωθεί εντός τριάντα (30) ημερών..."
+    },
+    {
+      "filename": "appendix.docx",
+      "page_number": null,
+      "snippet": "Η αναθέτουσα αρχή δύναται να εγκρίνει παράταση..."
+    }
+  ]
+}
+
+UI behavior to copy from NotebookLM conceptually
+
+Your app should always keep the user inside a single notebook context.
+
+So instead of:
+	•	“search all company files”
+
+prefer:
+	•	“open notebook: Διαγωνισμοί 2025”
+	•	ask questions only within that notebook
+
+That scoped context is what makes answers cleaner and more useful.
+
+Best technical setup for this
+
+For your stack, I would use:
+	•	FastAPI for API
+	•	PostgreSQL + pgvector for notebook/chunk storage
+	•	PyMuPDF + python-docx for ingestion
+	•	hybrid retrieval for search
+	•	Llama-Krikri-8B-Instruct for source-grounded answering
+	•	React or Streamlit frontend
+
+And I would add one more thing:
+	•	a reranker after retrieval
+
+Because NotebookLM-style answers feel better when the top evidence chunks are very tight. A reranker improves that a lot.
+
+The key rule
+
+The biggest difference between a plain chatbot and a NotebookLM-style agent is this:
+
+the LLM should never answer first. retrieval should answer first.
+
+Meaning:
+	•	retrieve evidence
+	•	show evidence
+	•	then let the LLM synthesize
+
+That is how you keep hallucinations down and make the product feel reliable.
+
+My recommendation for version 1
+
+Build v1 with these exact features:
+	1.	notebook creation
+	2.	PDF/DOCX upload
+	3.	chunking + indexing
+	4.	keyword + semantic search
+	5.	ask-a-question with citations
+	6.	saved summaries
+	7.	source viewer with page/snippet jump
+
+Then in v2 add:
+	•	compare documents
+	•	timeline extraction
+	•	obligations/deadlines extraction
+	•	audio overview
+
+
+
+
