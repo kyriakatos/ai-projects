@@ -1,0 +1,13 @@
+
+import torch
+# Check if MPS is available
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    print("Using MPS device")
+else:
+    device = torch.device("cpu")
+    print("MPS not available, using CPU")
+
+# Move model and tensors to MPS
+#model.to(device) # type: ignore
+#data = data.to(device) # type: ignore
