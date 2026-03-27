@@ -1,6 +1,6 @@
 from typing import Any, Dict, List
 from app.services.extractor import extract_text
-from app.services.chunking import chunk_text
+from app.services.chunking import chunk_legal_text
 from app.services.llm import call_llm
 
 def merge_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
