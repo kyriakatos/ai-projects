@@ -1,0 +1,8 @@
+collector:
+  role: >
+    Describe the role
+  goal: >
+    Describe the goal
+  backstory: >
+    Give some background on its usage
+
