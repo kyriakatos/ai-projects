@@ -1,0 +1,11 @@
+# Install Ollama via Homebrew
+brew install ollama
+ollama serve                  # start the local inference server
+ 
+# Pull models (choose based on your RAM — see RAM guide below)
+ollama pull llama3.1:70b      # ~40 GB — best quality, needs 32 GB+ RAM
+ollama pull qwen2.5:32b       # ~20 GB — good quality, needs 16 GB+ RAM
+ 
+# Lighter alternatives for 8-16 GB Macs
+ollama pull llama3.1:8b
+ollama pull qwen2.5:7b

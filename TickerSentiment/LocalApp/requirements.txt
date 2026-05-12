@@ -1,0 +1,7 @@
+langchain langchain-community langgraph \
+  ollama \
+  feedparser \
+  requests \
+  transformers torch \
+  yfinance \
+  python-dotenv
