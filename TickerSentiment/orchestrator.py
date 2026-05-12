@@ -2,6 +2,10 @@ import yfinance as yf
 from agents.data_agent    import DataAgent
 from agents.finbert_agent import FinBERTAgent
 from agents.llm_agent     import OllamaAnalystAgent, OllamaValidatorAgent
+import requests
+from bs4 import BeautifulSoup
+
+
  
 def resolve_company(ticker: str) -> str:
     try:
