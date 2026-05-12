@@ -1,7 +1,10 @@
-langchain langchain-community langgraph \
-  ollama \
-  feedparser \
-  requests \
-  transformers torch \
-  yfinance \
-  python-dotenv
+langchain == 1.2.18
+langchain-community == 0.4.1
+langgraph == 1.1.10
+ollama == 0.6.2
+feedparser == 6.0.12
+requests == 2.34.0
+transformers  == 5.8.0
+torch == 2.11.0
+yfinance == 1.3.0
+python-dotenv == 1.2.2

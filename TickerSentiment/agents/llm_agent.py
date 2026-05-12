@@ -1,7 +1,8 @@
 import ollama, json, re
  
 class OllamaAnalystAgent:
-    def __init__(self, model: str = "llama3.1:70b"):
+    #def __init__(self, model: str = "llama3.1:70b"):
+    def __init__(self, model: str = "llama3.1:8b"):
         self.model = model
  
     def analyze(self, ticker: str, company: str, text: str) -> dict:
@@ -33,7 +34,7 @@ Return ONLY valid JSON:
  
  
 class OllamaValidatorAgent:
-    def __init__(self, model: str = "qwen2.5:32b"):
+    def __init__(self, model: str = "qwen2.5:7b"):
         self.model = model
  
     def validate(self, ticker: str, primary: dict, text: str) -> dict:

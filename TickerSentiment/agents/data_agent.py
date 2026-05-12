@@ -12,7 +12,7 @@ class LocalSocialData:
 class DataAgent:
     """Stocktwits (free, no auth) + Google News RSS (free, no auth)."""
  
-    def fetch_stocktwits(self, ticker: str) -> list[str]:
+    """ def fetch_stocktwits(self, ticker: str) -> list[str]:
         url = f'https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json'
         try:
             resp     = requests.get(url, timeout=10)
@@ -23,10 +23,11 @@ class DataAgent:
             ]
         except Exception as e:
             print(f'Stocktwits error: {e}')
-            return []
+            return [] """
  
     def fetch_google_news(self, ticker: str, company: str) -> list[str]:
-        query = f'{company} {ticker} stock'
+        #query = f'{ticker} stock'
+        query = f'{ticker}'
         url   = (f'https://news.google.com/rss/search'
                  f'?q={query}&hl=en-US&gl=US&ceid=US:en')
         try:
@@ -37,12 +38,13 @@ class DataAgent:
             return []
  
     def fetch(self, ticker: str, company: str) -> LocalSocialData:
-        stocktwits = self.fetch_stocktwits(ticker)
+        #stocktwits = self.fetch_stocktwits(ticker)
         news       = self.fetch_google_news(ticker, company)
-        combined   = '\n'.join(stocktwits + news)
+        #combined   = '\n'.join(stocktwits + news)
         return LocalSocialData(
             ticker=ticker, company=company,
-            stocktwits_posts=stocktwits,
-            news_headlines=news,
-            combined_text=combined
+            #stocktwits_posts=stocktwits,
+            news_headlines=news
+            #,combined_text=combined
+            
         )
