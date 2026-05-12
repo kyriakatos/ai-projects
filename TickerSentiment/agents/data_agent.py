@@ -36,11 +36,27 @@ class DataAgent:
         except Exception as e:
             print(f'Google News error: {e}')
             return []
+        
+    def fetch_finviz_news(self, ticker: str, company: str) -> list[str]:
+        #query = f'{ticker} stock'
+        query = f'{ticker}'
+        url   = (f'https://finviz.com/quote.ashx?t={query}'
+
+        try:
+            feed = feedparser.parse(url)
+            return [entry.title for entry in feed.entries[:15]]
+        except Exception as e:
+            print(f'Finviz News error: {e}')
+            return []
  
     def fetch(self, ticker: str, company: str) -> LocalSocialData:
         #stocktwits = self.fetch_stocktwits(ticker)
-        news       = self.fetch_google_news(ticker, company)
+        ##news       = self.fetch_google_news(ticker, company)
         #combined   = '\n'.join(stocktwits + news)
+        news_finviz = self.fetch_finviz_news(ticker, company)
+        news = news_finviz
+
+
         return LocalSocialData(
             ticker=ticker, company=company,
             #stocktwits_posts=stocktwits,
