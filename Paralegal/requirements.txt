@@ -1,6 +1,0 @@
-fastapi
-uvicorn
-python-docx
-pymupdf
-pytesseract
-Pillow
